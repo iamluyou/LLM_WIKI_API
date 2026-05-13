@@ -80,8 +80,12 @@ def _extract_title(content: str, filename: str) -> str:
     return os.path.splitext(filename)[0].replace("-", " ")
 
 
-def score_file(content: str, filename: str, tokens: list[str], query_phrase: str) -> Optional[float]:
-    """评分函数，对齐桌面版 scoreFile"""
+def score_file(content: str, filename: str, tokens: list[str], query_phrase: str) -> tuple[Optional[float], bool]:
+    """评分函数，对齐桌面版 scoreFile
+    
+    Returns:
+        (score, title_match): score 为 None 表示不匹配，title_match 表示标题中包含查询短语
+    """
     title = _extract_title(content, filename)
     stem = os.path.splitext(filename)[0]
     content_lower = content.lower()
@@ -89,14 +93,17 @@ def score_file(content: str, filename: str, tokens: list[str], query_phrase: str
     stem_lower = stem.lower()
 
     score = 0.0
+    title_match = False
 
     # FILENAME_EXACT_BONUS
     if stem_lower == query_phrase.lower():
         score += FILENAME_EXACT_BONUS
+        title_match = True
 
     # PHRASE_IN_TITLE_BONUS
     if query_phrase.lower() in title_lower:
         score += PHRASE_IN_TITLE_BONUS
+        title_match = True
 
     # PHRASE_IN_CONTENT_PER_OCC
     if query_phrase:
@@ -107,12 +114,13 @@ def score_file(content: str, filename: str, tokens: list[str], query_phrase: str
     for token in tokens:
         if token.lower() in title_lower:
             score += TITLE_TOKEN_WEIGHT
+            title_match = True
 
     # CONTENT_TOKEN_WEIGHT
     for token in tokens:
         score += content_lower.count(token.lower()) * CONTENT_TOKEN_WEIGHT
 
-    return score if score > 0 else None
+    return (score, title_match) if score > 0 else (None, False)
 
 
 def build_snippet(content: str, query: str, context_chars: int = 80) -> str:
@@ -169,8 +177,9 @@ class SearchService:
                     continue
 
             # 评分
+            title_match = False
             if keyword:
-                s = score_file(content, filename, tokens, query_phrase)
+                s, title_match = score_file(content, filename, tokens, query_phrase)
                 if s is None:
                     continue
             else:
@@ -188,6 +197,7 @@ class SearchService:
                 "content": content,
                 "snippet": build_snippet(content, keyword) if keyword else "",
                 "score": s,
+                "title_match": title_match,
             })
 
         # 排序（按分数降序，同分按路径字典序）
@@ -197,7 +207,7 @@ class SearchService:
         # 分页
         paged = results[offset: offset + limit]
 
-        # 移除内部字段
+        # 移除内部字段（保留 title_match 给 query_engine 用）
         for r in paged:
             r.pop("score", None)
 

@@ -46,20 +46,28 @@ class TestTokenizeQuery:
 class TestScoreFile:
     def test_filename_exact_match(self):
         content = "# Test\nSome content"
-        score = score_file(content, "attention.md", ["attention"], "attention")
+        score, title_match = score_file(content, "attention.md", ["attention"], "attention")
         assert score is not None
         assert score >= 200  # FILENAME_EXACT_BONUS
+        assert title_match is True
 
     def test_phrase_in_title(self):
         content = "# Knowledge Management\nSome content"
-        score = score_file(content, "test.md", ["knowledge"], "knowledge")
+        score, title_match = score_file(content, "test.md", ["knowledge"], "knowledge")
         assert score is not None
         assert score >= 50  # PHRASE_IN_TITLE_BONUS
+        assert title_match is True
 
     def test_no_match(self):
         content = "# Something\nSome content"
-        score = score_file(content, "test.md", ["quantum"], "quantum")
-        assert score is None
+        result = score_file(content, "test.md", ["quantum"], "quantum")
+        assert result[0] is None
+
+    def test_content_match_no_title(self):
+        content = "# Something\nquantum physics content"
+        score, title_match = score_file(content, "test.md", ["quantum"], "quantum")
+        assert score is not None
+        assert title_match is False
 
 
 class TestBuildSnippet:
