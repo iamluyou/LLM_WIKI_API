@@ -152,21 +152,19 @@ class SearchService:
         for rel_path in wiki_files:
             filename = os.path.basename(rel_path)
 
-            # 类型过滤
-            if page_type:
-                parts = rel_path.split(os.sep)
-                if len(parts) > 1 and parts[0] != page_type:
-                    continue
-                if len(parts) == 1 and page_type != "root":
-                    continue
-
             content = self.wm.read_wiki_page(rel_path)
             if content is None:
                 continue
 
+            fm = self.wm.parse_frontmatter(content)
+
+            # 类型过滤（基于 frontmatter type 字段，而非目录名）
+            if page_type:
+                if fm.get("type", "") != page_type:
+                    continue
+
             # 标签过滤
             if tag:
-                fm = self.wm.parse_frontmatter(content)
                 if tag not in fm.get("tags", []):
                     continue
 
@@ -178,7 +176,6 @@ class SearchService:
             else:
                 s = 0.0
 
-            fm = self.wm.parse_frontmatter(content)
             slug = os.path.splitext(rel_path)[0]
             results.append({
                 "slug": slug,
