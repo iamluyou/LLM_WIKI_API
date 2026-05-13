@@ -1,10 +1,10 @@
 # LLM-WIKI API 架构设计技术文档
 
-> 版本：v1.2 | 日期：2026-05-13 | 状态：已实现
+> 版本：v1.3 | 日期：2026-05-13 | 状态：已实现
 
 ## 1. 概述
 
-本服务将 [LLM-WIKI](https://github.com/nashsu/llm_wiki) 桌面版的核心能力封装为 HTTP API，使外部系统可通过接口完成知识库的完整生命周期管理：**初始化 → 导入 → 消化 → 查询 → 删除**。
+本服务将 [LLM-WIKI](https://github.com/nashsu/llm_wiki) 桌面版的核心能力封装为 HTTP API，源码下载到目录：/Users/leisheng/Desktop/MyProject/llm_wiki-main 使外部系统可通过接口完成知识库的完整生命周期管理：**初始化 → 导入 → 消化 → 查询 → 删除**。
 
 ### 1.1 核心原则
 
@@ -42,6 +42,7 @@
 │  │  WikiManager  SearchService  IngestEngine            │       │
 │  │  QueryEngine   PageMerger   SourceLifecycle          │       │
 │  │  WikiInitializer  SourceDeleteDecision  WikiCleanup   │       │
+│  │  GraphRelevance  ContextBudget                        │       │
 │  └────────────────────┬────────────────────────────────┘       │
 │                       │                                         │
 │       ┌───────────────┼───────────────┐                         │
@@ -278,25 +279,147 @@ def normalize_wiki_ref_key(ref: str) -> str:
 
 向量搜索可选启用时，使用 Reciprocal Rank Fusion（K=60）融合 token 排名 + vector 排名。
 
-## 7. 安全层
+### 6.4 标题匹配标记
 
-### 7.1 项目级互斥锁
+`score_file()` 返回 `(score, title_match)` 元组，`title_match=True` 表示查询短语出现在标题或文件名中。此标记用于 Query 管线的优先级填充（P0 标题匹配优先于 P1 内容匹配）。
+
+## 7. Query 管线
+
+对齐桌面版 `chat-panel.tsx handleSend` 完整流程。
+
+### 7.1 管线总览
+
+```
+用户输入 question
+    │
+    ├── isGreeting? → 纯对话模式（跳过检索）
+    │
+    ├── Phase 1: computeContextBudget(llm_max_context)
+    │              → INDEX_BUDGET(5%), PAGE_BUDGET(50%), MAX_PAGE_SIZE
+    │
+    ├── Phase 2: searchWiki(question) → Top 10
+    │              Token搜索 → 排序 → 取前10
+    │
+    ├── Phase 3: 读取 index.md，按 query token 裁剪至 INDEX_BUDGET
+    │
+    ├── Phase 4: buildRetrievalGraph() → getRelatedNodes(limit=3)
+    │              → 图谱1跳扩展，relevance≥2.0
+    │
+    ├── Phase 5: 按优先级填充页面（P0→P1→P2→P3）
+    │              每页截断至MAX_PAGE_SIZE，总量不超过PAGE_BUDGET
+    │              生成 [1][2]...[N] 编号
+    │
+    ├── Phase 6: 组装System Prompt
+    │   Rules + Purpose + Index(裁剪) + PageList + Pages(编号+内容) + 语言指令
+    │
+    ├── Phase 7: LLM 调用
+    │
+    └── Phase 8: 解析引用（_extract_citations 三级回退）
+                  ① <!-- cited: 1, 3, 5 --> → ② [1][2] → ③ [[wikilinks]]
+```
+
+### 7.2 图增强检索（graph_relevance.py）
+
+对齐官方 `graph-relevance.ts`，4 信号加权 1 跳扩展：
+
+| 信号 | 权重 | 说明 |
+|------|------|------|
+| directLink | 3.0 | 双向 wikilink（A→B 或 B→A），每条链接得 1 分 |
+| sourceOverlap | 4.0 | Frontmatter sources 共享，每个共享 source 得 4 分 |
+| commonNeighbor | 1.5 | Adamic-Adar 共同邻居指标：`Σ 1/ln(degree)` |
+| typeAffinity | 1.0 | 节点类型亲和度矩阵（5×5） |
+
+**类型亲和度矩阵**：
+
+|  | entity | concept | source | synthesis | query |
+|--|--------|---------|--------|-----------|-------|
+| entity | 0.8 | 1.2 | 1.0 | 1.0 | 0.8 |
+| concept | 1.2 | 0.8 | 1.0 | 1.2 | 1.0 |
+| source | 1.0 | 1.0 | 0.5 | 1.0 | 0.8 |
+| synthesis | 1.0 | 1.2 | 1.0 | 0.8 | 1.0 |
+| query | 0.8 | 1.0 | 0.8 | 1.0 | 0.5 |
+
+**图构建**：遍历 wiki/ 所有 .md 文件，提取 frontmatter（title/type/sources）和 wikilink，构建双向图。带版本缓存，ingest 完成后 `clear_graph_cache()` 失效。
+
+**扩展参数**：每个搜索结果节点取 Top-3 相关节点，`relevance < 2.0` 丢弃，已在搜索命中中的去重。
+
+### 7.3 上下文预算控制（context_budget.py）
+
+对齐官方 `context-budget.ts`：
+
+```
+┌─────────────────────────────────────────────────────┐
+│              maxCtx (100%)                          │
+├──────┬───────────────┬──────────────────┬───────────┤
+│ idx  │   pages       │  history + sys   │  resp     │
+│  5%  │    50%        │    ~30%          │   15%     │
+└──────┴───────────────┴──────────────────┴───────────┘
+```
+
+| 参数 | 比例/规则 | 说明 |
+|------|----------|------|
+| DEFAULT_MAX_CTX | 204,800 字符 | 默认值（llm_max_context=0 时使用） |
+| RESPONSE_RESERVE_FRAC | 15% | 为 LLM 回答预留空间 |
+| INDEX_BUDGET_FRAC | 5% | Wiki 索引预算 |
+| PAGE_BUDGET_FRAC | 50% | 页面内容总预算 |
+| PER_PAGE_FRAC | 30% of pageBudget | 单页截断上限 |
+| PER_PAGE_FLOOR | 5,000 字符 | 单页最小允许长度 |
+
+单页截断规则：`min(pageBudget, max(5000, pageBudget × 30%))`
+
+### 7.4 引用编号系统
+
+对齐官方 `chat-panel.tsx` 的编号 + `<!-- cited -->` 机制：
+
+1. **上下文编号**：`### [1] Title\nPath: xxx\n\nContent`
+2. **Prompt 要求**：LLM 使用 `[1][2]` 引用，末尾添加 `<!-- cited: 1, 3, 5 -->`
+3. **解析三級回退**：
+   - 优先解析 `<!-- cited: ... -->` 隐藏注释（最精确）
+   - 回退：解析正文 `[1][2]` 编号
+   - 最终回退：解析 `[[wikilinks]]`
+
+### 7.5 页面优先级填充
+
+| 优先级 | 类别 | 条件 |
+|--------|------|------|
+| P0 | 标题匹配页面 | `title_match == True`（搜索结果） |
+| P1 | 内容匹配页面 | `title_match == False`（搜索结果） |
+| P2 | 图谱扩展页面 | graph_expansions 列表 |
+| P3 | 概览后备 | 仅当没有任何页面时加载 `overview.md` |
+
+贪心填充：按优先级顺序逐页加入，超过 PAGE_BUDGET 即停。
+
+### 7.6 Wiki Index 注入
+
+读取 `wiki/index.md`，按 query token 裁剪：
+- 保留所有 `##` 标题行
+- 保留包含 query token 的行
+- 直到达到 INDEX_BUDGET 上限
+- 末尾追加 `[...index trimmed to relevant entries...]`
+
+### 7.7 问候检测
+
+对齐官方 `greeting-detector.ts`：纯问候（hi/你好/嗨等）跳过检索管道，直接对话模式，不浪费 LLM 调用。
+
+## 8. 安全层
+
+### 8.1 项目级互斥锁
 
 所有写入操作通过 `with_project_lock` 保护，使用 `filelock` 实现跨进程互斥。超时 5 分钟。
 
 覆盖范围：Ingest 写入、Query save_to_wiki、Source 删除、index.md/log.md 更新。
 
-### 7.2 路径穿越防护
+### 8.2 路径穿越防护
 
 `isSafeIngestPath()` 拒绝：绝对路径、`..` 段、不以 `wiki/` 开头的路径、控制字符。
 
 威胁模型：攻击者在源文档中注入提示词，LLM 生成 `---FILE: ../../../etc/passwd---`。
 
-### 7.3 语言一致性守卫
+### 8.3 语言一致性守卫
 
 `content_matches_target_language()` 检查生成内容是否与目标语言一致。跳过 log.md、entities/、sources/ 等合理包含跨语言专有名词的页面。
 
-### 7.4 Ingest 内容清洗
+### 8.4 Ingest 内容清洗
 
 `ingest_sanitize.py` 对 LLM 生成的每个 FILE 块内容进行结构化清洗，修正 LLM 输出中的常见格式错误：
 
@@ -308,7 +431,7 @@ def normalize_wiki_ref_key(ref: str) -> str:
 
 **设计意图**：LLM 偶尔会在 FILE 块内容外层包裹代码围栏，或在 frontmatter 前添加 YAML 标记，或输出逗号分隔的 wikilink 列表（不符合 YAML 数组语法）。这些格式错误会导致 frontmatter 解析失败，进而触发 fallback 数组合并（丢失正文内容）。清洗层在 `parseFileBlocks()` 之后、写入之前执行。
 
-### 7.5 SHA256 增量缓存
+### 8.5 SHA256 增量缓存
 
 - 相同 source 内容（SHA256 比对）→ 跳过 LLM 调用
 - **文件存在性校验**（v1.2）：缓存命中时额外验证所有 `files_written` 仍存在于磁盘，任一缺失则视为缓存失效。对齐官方 `ingest-cache.ts` 的 bug 修复（幽灵条目问题）
@@ -316,9 +439,9 @@ def normalize_wiki_ref_key(ref: str) -> str:
 - 缓存存储在 `.llm-wiki/ingest-cache/`
 - 保存 `files_written`（从 `pages_created` + `pages_updated` 提取）和 `timestamp` 字段
 
-## 8. 页面合并机制
+## 9. 页面合并机制
 
-### 8.1 三层合并
+### 9.1 三层合并
 
 | 层级 | 范围 | 策略 | 说明 |
 |------|------|------|------|
@@ -330,7 +453,7 @@ def normalize_wiki_ref_key(ref: str) -> str:
 
 **第2层改进**（v1.1）：`merger_fn` 接收第1层合并后的文本作为 `new_content`，确保 LLM 合并时 frontmatter 数组字段已包含完整集合，避免 LLM 合并结果中丢失数组字段。
 
-### 8.2 健全性检查
+### 9.2 健全性检查
 
 | 检查 | 规则 | 失败处理 |
 |------|------|----------|
@@ -338,17 +461,17 @@ def normalize_wiki_ref_key(ref: str) -> str:
 | Body 缩短阈值 | `len(merged) >= max(len(old), len(new)) * 0.7` | 拒绝，fallback |
 | 数组字段完整性 | 合并后再次 union | 二次修复 |
 
-### 8.3 备份
+### 9.3 备份
 
 合并覆盖前 best-effort 备份到 `.llm-wiki/page-history/`，错误不阻塞主流程。
 
-### 8.4 index.md / overview.md 覆盖策略
+### 9.4 index.md / overview.md 覆盖策略
 
 对齐桌面版 `listing_pages` 策略：`index.md` 和 `overview.md` 由 LLM 完整生成后直接覆盖写入，不进行增量合并。这避免了增量追加导致的内容冗余和结构混乱问题。
 
-## 9. Prompt 保真度
+## 10. Prompt 保真度
 
-### 9.1 对齐桌面版 Prompt 结构
+### 10.1 对齐桌面版 Prompt 结构
 
 | Prompt | 角色 | 核心结构 |
 |--------|------|---------|
@@ -356,7 +479,7 @@ def normalize_wiki_ref_key(ref: str) -> str:
 | `buildGenerationPrompt` | wiki maintainer | system: 规则 + 示例；user: 上下文 + 截断源内容 |
 | `buildPageMerger` | — | 保留双方事实 + 消除冗余 + 重组织 + 保持 wikilink |
 
-### 9.2 Generation Prompt 结构（v1.1 重写）
+### 10.2 Generation Prompt 结构（v1.1 重写）
 
 对齐官方桌面版 Prompt 结构，将原单条消息拆分为 system + user 两条消息：
 
@@ -374,21 +497,21 @@ def normalize_wiki_ref_key(ref: str) -> str:
 - 现有 wiki 文件列表
 - **截断源内容**（`SOURCE_CONTENT_MAX_CHARS` 限制，默认 8000 字符）
 
-### 9.3 源内容注入
+### 10.3 源内容注入
 
 Generation 的 user 消息中包含截断后的源文件内容，使 LLM 能基于真实素材生成更准确的知识页面，而非仅依赖 Analysis 的摘要。
 
 - 截断限制由 `SOURCE_CONTENT_MAX_CHARS` 配置（默认 8000）
 - 超长内容截断并追加 `... (truncated, {total} chars total)` 提示
 
-### 9.4 语言强制策略
+### 10.4 语言强制策略
 
 - 首尾双次注入语言指令（利用 LLM 近期指令权重最高特性）
 - `MANDATORY OUTPUT LANGUAGE: Chinese` 在 prompt 首尾各出现一次
 
-## 10. 数据模型
+## 11. 数据模型
 
-### 10.1 Frontmatter Schema
+### 11.1 Frontmatter Schema
 
 所有页面必须包含：
 
@@ -406,7 +529,7 @@ Source 类型额外：`authors`, `year`, `url`, `venue`
 Thesis 类型额外：`confidence`, `status`
 Finding 类型额外：`source`, `confidence`, `replicated`
 
-### 10.2 页面类型与目录映射
+### 11.2 页面类型与目录映射
 
 | 类型 | 目录 | 说明 |
 |------|------|------|
@@ -420,15 +543,15 @@ Finding 类型额外：`source`, `confidence`, `replicated`
 | methodology | wiki/methodology/ | 研究方法 |
 | finding | wiki/findings/ | 实证结果 |
 
-## 11. API 接口详表
+## 12. API 接口详表
 
-### 11.1 初始化
+### 12.1 初始化
 
 | 端点 | 方法 | 参数 | 说明 |
 |------|------|------|------|
 | `/api/init` | POST | `force: bool` (query, 默认 false) | 初始化目录结构 |
 
-### 11.2 查询侧
+### 12.2 查询侧
 
 | 端点 | 方法 | 参数 | 说明 |
 |------|------|------|------|
@@ -436,7 +559,7 @@ Finding 类型额外：`source`, `confidence`, `replicated`
 | `/api/pages/{slug}` | GET | — | 获取单页面 |
 | `/api/query` | POST | question, save_to_wiki, language | 智能问答 |
 
-### 11.3 导入侧
+### 12.3 导入侧
 
 | 端点 | 方法 | 参数 | 说明 |
 |------|------|------|------|
@@ -445,7 +568,7 @@ Finding 类型额外：`source`, `confidence`, `replicated`
 | `/api/ingest` | POST | source_id (可选) | 执行 Ingest |
 | `/api/tasks/{task_id}` | GET | — | 查询任务状态 |
 
-### 11.4 辅助
+### 12.4 辅助
 
 | 端点 | 方法 | 参数 | 说明 |
 |------|------|------|------|
@@ -453,9 +576,9 @@ Finding 类型额外：`source`, `confidence`, `replicated`
 | `/api/graph` | GET | — | 知识图谱数据 |
 | `/health` | GET | — | 健康检查 |
 
-## 12. 模板与种子文件
+## 13. 模板与种子文件
 
-### 12.1 模板目录
+### 13.1 模板目录
 
 `app/templates/wiki_root/` 包含初始化所需的所有种子文件：
 
@@ -473,23 +596,23 @@ app/templates/wiki_root/
     └── core-plugins.json   ← 启用核心插件
 ```
 
-### 12.2 模板渲染
+### 13.2 模板渲染
 
 - `.md` 文件中的 `{{date}}` 占位符在初始化时替换为当前日期
 - `.json` 文件原样复制
 - 幂等：已存在的文件默认跳过，`force=true` 时覆盖
 
-## 13. 与桌面版的差异
+## 14. 与桌面版的差异
 
 | 差异点 | 原因 | 影响 |
 |--------|------|------|
 | LLM 非确定性 | 同 prompt 不同调用输出不同 | 页面风格略有差异，正常现象 |
-| 向量搜索（可选） | 初期 token 搜索 + RRF 已够用 | 检索召回率可后续增强 |
-| 模板仅 General | API 不提供模板选择 UI | 可手动替换模板目录 |
+| 向量搜索（可选） | 需要 embedding 服务 | 检索召回率可后续增强 |
+| 多轮对话 | API 场景可由调用方维护 | 单轮查询 |
 | Deep Research | 桌面版特有功能 | Phase 2 |
 | 多模态图像 | 管道复杂 | Phase 2 |
 
-## 14. 风险与缓解
+## 15. 风险与缓解
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
@@ -505,7 +628,21 @@ app/templates/wiki_root/
 | 缓存幽灵条目 | 文件已删除但缓存仍命中 | 缓存命中时校验 files_written 存在性（v1.2） |
 | Frontmatter 解析失败 | 数组合并丢失正文 | ingest_sanitize 预清洗 + fallback 合并 |
 
-## 15. 变更记录
+## 16. 变更记录
+
+### v1.3 (2026-05-13)
+
+| 变更项 | 说明 | 影响文件 |
+|--------|------|----------|
+| 图增强检索 | 4 信号加权 1 跳扩展（directLink 3.0 + sourceOverlap 4.0 + Adamic-Adar 1.5 + typeAffinity 1.0），搜索 Top-10 → 每节点扩展 3 个相关节点（relevance≥2.0） | `services/graph_relevance.py` (新) |
+| 引用编号系统 | 页面编号 [1][2]...[N]，Prompt 要求 LLM 使用编号引用 + `<!-- cited: -->` 隐藏注释，三级回退解析 | `services/query_engine.py` |
+| Context 预算控制 | 对齐官方 computeContextBudget：indexBudget(5%) + pageBudget(50%) + responseReserve(15%)，单页截断 max(5000, pageBudget×30%) | `services/context_budget.py` (新) |
+| Wiki Index 注入 | 读取 index.md，按 query token 裁剪至预算内 | `services/query_engine.py` |
+| 页面优先级填充 | P0 标题匹配 → P1 内容匹配 → P2 图谱扩展 → P3 overview 兜底，贪心填充 | `services/query_engine.py` |
+| 问候检测 | 纯问候跳过检索管道，直接对话模式 | `services/query_engine.py` |
+| score_file 返回 title_match | 标记查询短语是否出现在标题/文件名中，用于优先级填充 | `services/search.py` |
+| 搜索类型过滤修复 | 基于_frontmatter type 字段而非目录名过滤 | `services/search.py` |
+| 新增测试 | graph_relevance 15 个 + context_budget 7 个 + query_engine 8 个 + search 1 个，共 326 个测试 | `tests/test_*.py` |
 
 ### v1.2 (2026-05-13)
 
