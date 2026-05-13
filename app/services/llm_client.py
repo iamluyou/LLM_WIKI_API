@@ -29,19 +29,27 @@ class LLMClient:
     def chat(
         self,
         messages: list[dict],
-        max_tokens: int = 16000,
-        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
     ) -> tuple[str, dict]:
-        """调用 LLM，返回 (response_text, usage_stats)"""
+        """调用 LLM，返回 (response_text, usage_stats)
+
+        对齐桌面版：默认不传 max_tokens 和 temperature，让模型使用自身默认值。
+        桌面版 streamChat 不传 requestOverrides，buildOpenAiBody 只输出
+        { messages, stream: true }，不设置任何采样参数。
+        """
         msg_count = len(messages)
-        logger.info(f"[LLM] Calling {self.model} with {msg_count} messages, max_tokens={max_tokens}")
+        logger.info(f"[LLM] Calling {self.model} with {msg_count} messages, max_tokens={max_tokens}, temperature={temperature}")
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            kwargs: dict = {
+                "model": self.model,
+                "messages": messages,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            response = self.client.chat.completions.create(**kwargs)
             text = response.choices[0].message.content or ""
             usage = {
                 "input": getattr(response.usage, "prompt_tokens", 0) or 0,
@@ -56,22 +64,25 @@ class LLMClient:
     async def achat(
         self,
         messages: list[dict],
-        max_tokens: int = 16000,
-        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
     ) -> tuple[str, dict]:
         """异步调用 LLM（在线程池中执行同步调用，避免阻塞事件循环）"""
         return await asyncio.to_thread(self.chat, messages, max_tokens, temperature)
 
-    def chat_stream(self, messages: list[dict], max_tokens: int = 16000, temperature: float = 0.3):
+    def chat_stream(self, messages: list[dict], max_tokens: Optional[int] = None, temperature: Optional[float] = None):
         """流式调用 LLM"""
         try:
-            stream = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                stream=True,
-            )
+            kwargs: dict = {
+                "model": self.model,
+                "messages": messages,
+                "stream": True,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            stream = self.client.chat.completions.create(**kwargs)
             for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content

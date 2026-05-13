@@ -17,7 +17,7 @@ class TestRunQuery:
              patch("app.services.query_engine.build_retrieval_graph") as mock_graph:
 
             mock_svc = MagicMock()
-            mock_svc.search.return_value = ([], 0)
+            mock_svc.search_with_rrf = AsyncMock(return_value=([], 0))
             mock_svc_cls.return_value = mock_svc
             mock_llm.achat = AsyncMock(return_value=("I don't know", {"input": 5, "output": 10}))
 
@@ -52,10 +52,10 @@ class TestRunQuery:
             mock_settings.llm_max_context = 204800
             mock_settings.output_language = "Chinese"
             mock_svc = MagicMock()
-            mock_svc.search.return_value = (
+            mock_svc.search_with_rrf = AsyncMock(return_value=(
                 [{"slug": "ai", "title": "AI", "type": "entity", "tags": [], "related": [], "created": "", "updated": "", "content": "", "snippet": "", "title_match": True}],
                 1,
-            )
+            ))
             mock_svc_cls.return_value = mock_svc
 
             mock_wm.read_wiki_page.return_value = "---\ntitle: AI\n---\nAI content"

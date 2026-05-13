@@ -24,9 +24,11 @@ class TestTokenizeQuery:
 
     def test_chinese_with_stopwords(self):
         tokens = tokenize_query("什么是知识管理")
-        # 停用词 "什么" 应被过滤
         lower_tokens = [t.lower() for t in tokens]
-        assert "什么" not in lower_tokens
+        # 对齐桌面版：bigram "什么" 不受停用词过滤（只有单字和初始分词才过滤）
+        assert "什么" in lower_tokens  # bigram 不走停用词
+        # 单字 "是" 是停用词，应被过滤
+        assert "是" not in lower_tokens
 
     def test_mixed_query(self):
         tokens = tokenize_query("RAG 在 AI 中的应用")

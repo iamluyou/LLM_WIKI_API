@@ -1,6 +1,6 @@
 # LLM-WIKI API 架构设计技术文档
 
-> 版本：v1.3 | 日期：2026-05-13 | 状态：已实现
+> 版本：v1.4 | 日期：2026-05-13 | 状态：已实现
 
 ## 1. 概述
 
@@ -60,6 +60,7 @@
 │       ▼                       └──────────────┘                  │
 │  ┌──────────┐                                                   │
 │  │LLM Client│  (OpenAI 兼容, glm-5.1, reasoning=max)           │
+│  │          │  默认不传 max_tokens/temperature（对齐桌面版）    │
 │  └──────────┘                                                   │
 └─────────────────────────────────────────────────────────────────┘
                           │
@@ -304,6 +305,7 @@ def normalize_wiki_ref_key(ref: str) -> str:
     │
     ├── Phase 4: buildRetrievalGraph() → getRelatedNodes(limit=3)
     │              → 图谱1跳扩展，relevance≥2.0
+    │              → 用 node.path 去重（对齐桌面版 searchHitPaths）
     │
     ├── Phase 5: 按优先级填充页面（P0→P1→P2→P3）
     │              每页截断至MAX_PAGE_SIZE，总量不超过PAGE_BUDGET
@@ -313,6 +315,8 @@ def normalize_wiki_ref_key(ref: str) -> str:
     │   Rules + Purpose + Index(裁剪) + PageList + Pages(编号+内容) + 语言指令
     │
     ├── Phase 7: LLM 调用
+    │   不传 max_tokens / temperature（对齐桌面版不设 requestOverrides）
+    │   Prompt 引导全面引用："Cite ALL pages" + "THOROUGH and COMPREHENSIVE"
     │
     └── Phase 8: 解析引用（_extract_citations 三级回退）
                   ① <!-- cited: 1, 3, 5 --> → ② [1][2] → ③ [[wikilinks]]
@@ -341,7 +345,7 @@ def normalize_wiki_ref_key(ref: str) -> str:
 
 **图构建**：遍历 wiki/ 所有 .md 文件，提取 frontmatter（title/type/sources）和 wikilink，构建双向图。带版本缓存，ingest 完成后 `clear_graph_cache()` 失效。
 
-**扩展参数**：每个搜索结果节点取 Top-3 相关节点，`relevance < 2.0` 丢弃，已在搜索命中中的去重。
+**扩展参数**：每个搜索结果节点取 Top-3 相关节点，`relevance < 2.0` 丢弃，已在搜索命中中的去重（使用 `node.path` 判重，对齐桌面版 `searchHitPaths.has(node.path)`）。
 
 ### 7.3 上下文预算控制（context_budget.py）
 
@@ -612,6 +616,8 @@ app/templates/wiki_root/
 | Deep Research | 桌面版特有功能 | Phase 2 |
 | 多模态图像 | 管道复杂 | Phase 2 |
 
+> **v1.4 对齐说明**：Query 管线已完全对齐桌面版 LLM 调用行为——不传 `max_tokens` 和 `temperature`（桌面版 `streamChat` 不传 `requestOverrides`，`buildOpenAiBody` 只输出 `{ messages, stream: true }`）。图扩展去重使用 `node.path`（对齐桌面版 `searchHitPaths.has(node.path)`）。
+
 ## 15. 风险与缓解
 
 | 风险 | 影响 | 缓解 |
@@ -629,6 +635,26 @@ app/templates/wiki_root/
 | Frontmatter 解析失败 | 数组合并丢失正文 | ingest_sanitize 预清洗 + fallback 合并 |
 
 ## 16. 变更记录
+
+### v1.4 (2026-05-13)
+
+| 变更项 | 说明 | 影响文件 |
+|--------|------|----------|
+| LLM 调用参数对齐桌面版 | `max_tokens` 默认从 `16000` 改为 `None`（不传），`temperature` 默认从 `0.3` 改为 `None`（不传），对齐桌面版 `streamChat` 不传 `requestOverrides` 行为 | `services/llm_client.py` |
+| 图扩展 limit 对齐 | `getRelatedNodes(limit=5)` → `limit=3`，对齐桌面版 | `services/query_engine.py` |
+| 图扩展去重方式对齐 | 从 `node.id`（filename）改为 `node.path`（完整相对路径），对齐桌面版 `searchHitPaths.has(node.path)` | `services/query_engine.py` |
+| Query LLM 不传 max_tokens | `achat(messages, max_tokens=8000)` → `achat(messages)`，对齐桌面版不限制输出长度 | `services/query_engine.py` |
+| System Prompt 增强引用引导 | 新增 "Cite ALL pages that contribute to your answer" + "Provide a THOROUGH and COMPREHENSIVE answer"，引导 LLM 全面引用上下文页面 | `services/query_engine.py` |
+| chat_stream 参数对齐 | `chat_stream` 方法同样改为 `max_tokens=None`、`temperature=None` 默认不传 | `services/llm_client.py` |
+
+**效果对比**（测试查询："我想调用LLM分析图片应该如何处理？"）：
+
+| 指标 | v1.3 | v1.4 |
+|------|------|------|
+| 引用数 | 3 | 10 |
+| 输出字符 | 1225 | 2438 |
+| Takin 平台引用 | ❌ | ✅ |
+| 关键词覆盖率 | 30% | 100% |
 
 ### v1.3 (2026-05-13)
 

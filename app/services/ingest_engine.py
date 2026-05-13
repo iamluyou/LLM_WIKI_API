@@ -170,6 +170,17 @@ async def _ingest_one(
             wiki_manager.write_wiki_page(rel_path, content)
             pages_updated.append(rel_path)
             logger.info(f"[Ingest] Overwrote {rel_path}")
+            # Embed structural pages too
+            if settings.embedding_enabled and settings.embedding_model:
+                try:
+                    from app.services.embedding import embed_page
+                    page_id = os.path.splitext(rel_path)[0]
+                    import asyncio
+                    asyncio.create_task(embed_page(
+                        settings.wiki_root, page_id, "", content
+                    ))
+                except Exception:
+                    pass
         else:
             # 合并
             existing = wiki_manager.read_wiki_page(rel_path)
@@ -203,6 +214,22 @@ async def _ingest_one(
                     logger.info(f"[Ingest] Merged (LLM) existing page: {rel_path}")
                 else:
                     logger.info(f"[Ingest] Updated existing page: {rel_path}")
+
+            # Embed page for vector search (fire-and-forget)
+            if settings.embedding_enabled and settings.embedding_model:
+                try:
+                    from app.services.embedding import embed_page
+                    page_id = os.path.splitext(rel_path)[0]
+                    page_title = ""
+                    fm = wiki_manager.parse_frontmatter(merged)
+                    if fm.get("title"):
+                        page_title = fm["title"]
+                    import asyncio
+                    asyncio.create_task(embed_page(
+                        settings.wiki_root, page_id, page_title, merged
+                    ))
+                except Exception as e:
+                    logger.warning(f"[Ingest] Embedding failed for {rel_path}: {e}")
 
     # Step 5: 解析 Review 块（暂存，后续通过 /api/reviews 查看）
     reviews = parse_review_blocks(generation_result)

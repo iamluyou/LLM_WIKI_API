@@ -49,6 +49,23 @@ class Settings(BaseSettings):
     }
 
     @property
+    def effective_embedding_api_key(self) -> str:
+        """Embedding API Key，回退到 LLM API Key"""
+        return self.embedding_api_key or self.llm_api_key
+
+    @property
+    def effective_embedding_endpoint(self) -> str:
+        """Embedding endpoint，自动从 LLM base URL 推导"""
+        if self.embedding_endpoint:
+            return self.embedding_endpoint
+        # 从 LLM base URL 推导: .../v3 → .../v3/embeddings
+        base = self.llm_base_url.rstrip("/")
+        # 去掉 /chat/completions 后缀
+        if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]
+        return f"{base}/embeddings"
+
+    @property
     def wiki_raw_dir(self) -> str:
         return os.path.join(self.wiki_root, "raw", "sources")
 

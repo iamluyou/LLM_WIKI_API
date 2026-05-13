@@ -5,6 +5,7 @@
 
 import logging
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -164,8 +165,11 @@ def build_retrieval_graph(wm: WikiManager, data_version: int = 0) -> RetrievalGr
     raw_nodes: list[dict] = []
 
     # 第一遍：读取所有文件，构建原始节点数据
+    # 对齐桌面版：node_id = fileName（不含目录前缀），如 "takin-platform" 而非 "entities/takin-platform"
+    # 这样 [[takin-platform]] wikilink 才能匹配
     for rel_path in wiki_files:
-        node_id = rel_path.replace(".md", "")
+        filename = os.path.basename(rel_path)
+        node_id = filename.replace(".md", "")
         content = wm.read_wiki_page(rel_path)
         if content is None:
             continue

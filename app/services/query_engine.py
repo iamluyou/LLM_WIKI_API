@@ -82,11 +82,11 @@ async def run_query(
         f"maxPageSize={budget.max_page_size}"
     )
 
-    # ── Phase 2: Token 搜索 → Top 10 ──
+    # ── Phase 2: Token + 向量搜索 → RRF 融合 → Top 10 ──
     search_svc = SearchService(wiki_manager)
-    search_results, total = search_svc.search(keyword=question, limit=10)
+    search_results, total = await search_svc.search_with_rrf(keyword=question, limit=10)
     top_search = search_results[:10]
-    logger.info(f"[Query] Search returned {total} results, top {len(top_search)} taken")
+    logger.info(f"[Query] Search (RRF) returned {total} results, top {len(top_search)} taken")
 
     if not top_search:
         logger.info("[Query] No search results, falling back to direct answer")
@@ -98,16 +98,23 @@ async def run_query(
 
     # ── Phase 4: Graph 1 跳扩展 ──
     graph = build_retrieval_graph(wiki_manager)
+    # 对齐桌面版：图中 node_id 是文件名（不含目录前缀），搜索结果的 slug 含目录前缀
+    # 需要从 slug 提取 filename 来匹配图节点
+    import os as _os
+    # 对齐桌面版：searchHitPaths 用 node.path（完整相对路径如 entities/takin-platform.md）
+    # 用于 graph expansion 去重，避免搜索命中页被重复添加
     search_hit_paths = {r["slug"] + ".md" for r in top_search}
     expanded_ids: set[str] = set()
     graph_expansions: list[dict] = []
 
     for r in top_search:
-        node_id = r["slug"]
+        # slug → filename-based node_id（对齐桌面版 fileNameToId）
+        node_id = _os.path.basename(r["slug"])
         related = get_related_nodes(node_id, graph, limit=3)
         for node, relevance in related:
             if relevance < 2.0:
                 continue
+            # 对齐桌面版：用 node.path 判重（searchHitPaths.has(node.path)）
             if node.path in search_hit_paths:
                 continue
             if node.id in expanded_ids:
@@ -196,6 +203,8 @@ async def run_query(
         "- If the provided pages don't contain enough information, say so honestly.",
         "- Use [[wikilink]] syntax to reference wiki pages.",
         "- When citing information, use the page number in brackets, e.g. [1], [2].",
+        "- Cite ALL pages that contribute to your answer — do not omit relevant pages.",
+        "- Provide a THOROUGH and COMPREHENSIVE answer that leverages the full breadth of relevant wiki pages.",
         "- At the VERY END of your response, add a hidden comment listing which page numbers you used:",
         "  <!-- cited: 1, 3, 5 -->",
         "",
@@ -217,13 +226,19 @@ async def run_query(
         f"DO NOT use any other language. This overrides all other instructions.",
     ]))
 
+    # 对齐桌面版：langReminder 注入到用户消息前（强化输出语言约束）
+    lang_reminder = f"REMINDER: All output must be in {lang_name}. Do not use any other language."
+    user_content = f"[{lang_reminder}]\n\n{question}"
+
     messages = [
         {"role": "system", "content": system_content},
-        {"role": "user", "content": question},
+        {"role": "user", "content": user_content},
     ]
 
     # ── Phase 7: LLM 调用 ──
-    answer, usage = await llm_client.achat(messages, max_tokens=8000)
+    # 对齐桌面版：不硬编码 max_tokens，由 response_reserve 自然限制输出长度
+    # 桌面版不传 max_tokens，模型可利用全部剩余上下文空间生成完整回答
+    answer, usage = await llm_client.achat(messages)
     logger.info(f"[Query] LLM answered: tokens={usage}, answer length={len(answer)}")
 
     # ── Phase 8: 解析引用编号 ──
@@ -338,7 +353,7 @@ async def _direct_answer(
         },
         {"role": "user", "content": question + lang_rule},
     ]
-    answer, usage = await llm_client.achat(messages, max_tokens=4000)
+    answer, usage = await llm_client.achat(messages)
     return QueryResponse(answer=answer, tokens_used=usage)
 
 

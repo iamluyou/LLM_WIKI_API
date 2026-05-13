@@ -147,7 +147,7 @@ WikiApi/
 │   │   ├── source_lifecycle.py    # Source 删除流程编排
 │   │   ├── source_delete_decision.py  # 页面命运决策（skip/keep/delete）
 │   │   ├── wiki_cleanup.py        # 引用清理（wikilink/index/related）
-│   │   ├── llm_client.py          # LLM 调用封装
+│   │   ├── llm_client.py          # LLM 调用封装（默认不传 max_tokens/temperature，对齐桌面版）
 │   │   └── task_queue.py          # 异步任务队列（状态持久化到 tasks.json）
 │   ├── prompts/                   # Prompt 模板（对齐桌面版）
 │   │   ├── analysis.py            # buildAnalysisPrompt
@@ -214,7 +214,7 @@ Ingest 缓存命中时（SHA256 比对通过），额外验证所有 `files_writ
 
 ### Query 管线对齐桌面版
 
-对齐官方 `chat-panel.tsx handleSend` 完整流程：token 搜索 Top-10 → 图增强 1 跳扩展（4 信号加权：directLink 3.0 + sourceOverlap 4.0 + Adamic-Adar 1.5 + typeAffinity 1.0）→ 预算控制（5% index + 50% pages + 15% reserve）→ 优先级填充（P0 标题匹配 > P1 内容匹配 > P2 图扩展 > P3 overview 兜底）→ 编号引用 `[1][2]` + `<!-- cited: -->` → LLM 综合回答。
+对齐官方 `chat-panel.tsx handleSend` 完整流程：token 搜索 Top-10 → 图增强 1 跳扩展（每节点 Top-3，4 信号加权：directLink 3.0 + sourceOverlap 4.0 + Adamic-Adar 1.5 + typeAffinity 1.0，relevance≥2.0 过滤，`node.path` 去重对齐桌面版 `searchHitPaths`）→ 预算控制（5% index + 50% pages + 15% reserve）→ 优先级填充（P0 标题匹配 > P1 内容匹配 > P2 图扩展 > P3 overview 兜底）→ 编号引用 `[1][2]` + `<!-- cited: -->` → LLM 综合回答（不传 `max_tokens`/`temperature`，对齐桌面版不设 `requestOverrides`）。
 
 ### 任务状态持久化
 
