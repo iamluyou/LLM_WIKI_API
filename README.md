@@ -49,7 +49,7 @@ curl -X POST http://localhost:6003/api/init
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/api/sources` | POST | 存入原始资料到 raw/sources/ |
+| `/api/sources` | POST | 存入原始资料到 raw/sources/（重名自动重命名，对齐桌面版 getUniqueDestPath） |
 | `/api/sources/{source_id}` | DELETE | 删除 source 及其级联关联页面 |
 | `/api/ingest` | POST | 执行 Ingest（LLM 两步思维链，异步） |
 | `/api/tasks/{task_id}` | GET | 查询 Ingest 任务状态 |
@@ -65,35 +65,38 @@ curl -X POST http://localhost:6003/api/init
 ## 使用示例
 
 ```bash
+# 认证 header（API_KEY 为空时跳过认证）
+AUTH="Authorization: Bearer sk-xxx"
+
 # 1. 初始化 wiki 目录（首次）
-curl -X POST http://localhost:6003/api/init
+curl -X POST http://localhost:6003/api/init -H "$AUTH"
 
 # 2. 搜索
-curl "http://localhost:6003/api/pages?keyword=LLM&limit=5"
+curl "http://localhost:6003/api/pages?keyword=LLM&limit=5" -H "$AUTH"
 
 # 3. 获取页面
-curl "http://localhost:6003/api/pages/entities/llm-wiki"
+curl "http://localhost:6003/api/pages/entities/llm-wiki" -H "$AUTH"
 
 # 4. 导入文档
 curl -X POST http://localhost:6003/api/sources \
-  -H "Content-Type: application/json" \
+  -H "$AUTH" -H "Content-Type: application/json" \
   -d '{"title": "新文档", "content": "# 新文档\n\n内容..."}'
 
 # 5. 执行 Ingest（异步）
 curl -X POST http://localhost:6003/api/ingest \
-  -H "Content-Type: application/json" \
+  -H "$AUTH" -H "Content-Type: application/json" \
   -d '{"source_id": "新文档-2026-05-12"}'
 
 # 6. 查询任务状态
-curl http://localhost:6003/api/tasks/task-20260512-001
+curl http://localhost:6003/api/tasks/task-20260512-001 -H "$AUTH"
 
 # 7. 智能问答
 curl -X POST http://localhost:6003/api/query \
-  -H "Content-Type: application/json" \
+  -H "$AUTH" -H "Content-Type: application/json" \
   -d '{"question": "LLM-WIKI 和传统 RAG 有什么区别？"}'
 
 # 8. 删除 source 及其关联页面
-curl -X DELETE http://localhost:6003/api/sources/ai-native-era-2026-05-12
+curl -X DELETE http://localhost:6003/api/sources/ai-native-era-2026-05-12 -H "$AUTH"
 ```
 
 ## 配置说明
@@ -107,9 +110,11 @@ curl -X DELETE http://localhost:6003/api/sources/ai-native-era-2026-05-12
 | `LLM_REASONING_MODE` | max | 推理模式 |
 | `OUTPUT_LANGUAGE` | Chinese | 输出语言 |
 | `WIKI_ROOT` | — | Wiki 目录绝对路径 |
+| `API_KEY` | — | API 认证密钥（为空则不校验，请求时 `Authorization: Bearer <API_KEY>`） |
 | `HOST` | 0.0.0.0 | 监听地址 |
 | `PORT` | 6003 | 监听端口 |
 | `INGEST_CACHE_ENABLED` | true | 是否启用 SHA256 缓存 |
+| `SOURCE_CONTENT_MAX_CHARS` | 8000 | Generation 注入源内容的最大字符数 |
 
 ## 测试
 
@@ -141,7 +146,7 @@ WikiApi/
 │   │   ├── source_delete_decision.py  # 页面命运决策（skip/keep/delete）
 │   │   ├── wiki_cleanup.py        # 引用清理（wikilink/index/related）
 │   │   ├── llm_client.py          # LLM 调用封装
-│   │   └── task_queue.py          # 异步任务队列
+│   │   └── task_queue.py          # 异步任务队列（状态持久化到 tasks.json）
 │   ├── prompts/                   # Prompt 模板（对齐桌面版）
 │   │   ├── analysis.py            # buildAnalysisPrompt
 │   │   ├── generation.py          # buildGenerationPrompt
@@ -155,7 +160,8 @@ WikiApi/
 │   │   ├── project_lock.py        # 项目级互斥锁
 │   │   ├── path_guard.py          # 路径穿越防护
 │   │   ├── language_guard.py      # 语言一致性守卫
-│   │   └── ingest_cache.py        # SHA256 增量缓存
+│   │   ├── ingest_sanitize.py     # LLM 输出清洗（围栏/前缀/Wikilink 修复）
+│   │   └── ingest_cache.py        # SHA256 增量缓存 + 文件存在性校验
 │   ├── models/
 │   │   └── wiki.py                # 数据模型
 │   └── templates/wiki_root/       # 初始化种子模板（对齐官方）
@@ -166,7 +172,7 @@ WikiApi/
 │       │   ├── overview.md
 │       │   └── log.md
 │       └── .obsidian/             # Obsidian 配置
-├── tests/                         # 248 个测试用例
+├── tests/                         # 288 个测试用例
 ├── DESIGN.md                      # 架构设计文档
 └── requirements.txt
 ```
@@ -174,5 +180,38 @@ WikiApi/
 ## 与 LLM-WIKI 桌面版的关系
 
 本服务**不依赖桌面版代码**，仅共享同一文件系统目录（`WIKI_ROOT`）。两者可以同时运行，通过文件锁互斥保证并发安全。
+
+## 关键机制
+
+### Source 重名处理
+
+对齐官方桌面版 `getUniqueDestPath` 策略，**绝不覆盖已有文件**：
+
+| 优先级 | 文件名格式 | 示例 |
+|--------|-----------|------|
+| 1 | 原始文件名 | `report.md` |
+| 2 | 追加日期 | `report-20260512.md` |
+| 3 | 日期+计数器 | `report-20260512-2.md`（2~99） |
+| 4 | 兜底：毫秒时间戳 | `report-20260512-1749723456789.md` |
+
+### Ingest 内容清洗
+
+LLM 生成的内容可能包含格式错误（代码围栏包装、Frontmatter 前缀、Wikilink 列表语法错误），`ingest_sanitize.py` 在写入前自动修复，避免 Frontmatter 解析失败导致正文丢失。
+
+### Generation 源内容注入
+
+Generation Prompt 拆分为 system（规则+示例）+ user（上下文+截断源内容），使 LLM 能基于真实素材生成更准确的知识页面。截断长度由 `SOURCE_CONTENT_MAX_CHARS` 控制。
+
+### 页面合并改进
+
+三层合并的第1层改为直接文本操作（正则替换），第2层 LLM 合并接收第1层结果，确保数组字段不丢失。支持 block form（`name:\n  - a\n  - b`）和 inline form（`name: [a, b]`）两种 frontmatter 数组格式解析与替换（对齐官方 `parseFrontmatterArray`/`writeFrontmatterArray`）。index.md/overview.md 采用直接覆盖策略（对齐官方 listing pages）。
+
+### 缓存文件存在性校验
+
+Ingest 缓存命中时（SHA256 比对通过），额外验证所有 `files_written` 仍存在于磁盘，防止幽灵条目（文件被删除但缓存仍声称其存在）。对齐官方 `ingest-cache.ts` 的 bug 修复。
+
+### 任务状态持久化
+
+Ingest 任务状态持久化到 `{WIKI_ROOT}/.llm-wiki/tasks.json`，服务重启后任务记录可恢复。重启时处于 `processing` 的任务自动标记为 `failed`（因处理过程已中断）。
 
 详细架构设计见 [DESIGN.md](./DESIGN.md)。

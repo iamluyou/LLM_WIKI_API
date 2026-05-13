@@ -48,7 +48,7 @@ class TestPagesRouter:
 class TestSourcesRouter:
     def test_create_source(self):
         with patch("app.routers.sources.wiki_manager") as mock_wm:
-            mock_wm.write_raw_source.return_value = "raw/sources/test.md"
+            mock_wm.write_raw_source.return_value = ("test.md", "raw/sources/test.md")
             resp = client.post("/api/sources", json={
                 "title": "Test Source",
                 "content": "Some content",
@@ -58,7 +58,7 @@ class TestSourcesRouter:
 
     def test_create_source_with_filename(self):
         with patch("app.routers.sources.wiki_manager") as mock_wm:
-            mock_wm.write_raw_source.return_value = "raw/sources/custom.md"
+            mock_wm.write_raw_source.return_value = ("custom.md", "raw/sources/custom.md")
             resp = client.post("/api/sources", json={
                 "title": "Test",
                 "content": "Content",

@@ -55,8 +55,11 @@ def delete_source(source_id: str, file_already_deleted: bool = False) -> SourceD
     Returns:
         SourceDeleteResult
     """
+    logger.info(f"[SourceDelete] Starting delete for source_id={source_id}, file_already_deleted={file_already_deleted}")
     with ProjectLock():
-        return _delete_source_impl(source_id, file_already_deleted)
+        result = _delete_source_impl(source_id, file_already_deleted)
+    logger.info(f"[SourceDelete] Done: source_deleted={result.source_deleted}, pages_deleted={len(result.deleted_wiki_pages)}, pages_rewritten={len(result.rewritten_pages)}, kept_shared={result.kept_shared_pages}")
+    return result
 
 
 def delete_source_batch(source_ids: List[str], file_already_deleted: bool = False) -> List[SourceDeleteResult]:

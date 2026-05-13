@@ -23,6 +23,9 @@ class Settings(BaseSettings):
         alias="WIKI_ROOT",
     )
 
+    # API 认证
+    api_key: str = Field(default="", alias="API_KEY")
+
     # 服务配置
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=6003, alias="PORT")

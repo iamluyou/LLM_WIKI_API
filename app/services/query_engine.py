@@ -25,13 +25,16 @@ async def run_query(
 ) -> QueryResponse:
     """执行智能问答"""
     target_lang = language or settings.output_language
+    logger.info(f"[Query] Received question: {question!r} (lang={target_lang}, save={save_to_wiki})")
 
     # Step 1: 检索相关页面
     search_svc = SearchService(wiki_manager)
     results, total = search_svc.search(keyword=question, limit=10)
+    logger.info(f"[Query] Search returned {total} results, top {len(results)} taken")
 
     if not results:
         # 无相关页面，直接让 LLM 回答
+        logger.info(f"[Query] No relevant pages found, falling back to direct answer")
         return await _direct_answer(question, target_lang, save_to_wiki)
 
     # Step 2: 读取相关页面内容
@@ -46,6 +49,7 @@ async def run_query(
                 title=r["title"],
                 relevance="直接相关",
             ))
+    logger.info(f"[Query] Read {len(page_contents)} pages for context: {[c.slug for c in citations]}")
 
     # Step 3: 组装上下文 + LLM 回答
     purpose = wiki_manager.read_purpose()
@@ -77,7 +81,8 @@ async def run_query(
         },
     ]
 
-    answer, usage = llm_client.chat(messages, max_tokens=8000)
+    answer, usage = await llm_client.achat(messages, max_tokens=8000)
+    logger.info(f"[Query] LLM answered: tokens={usage}, answer length={len(answer)}")
 
     # Step 4: 可选写回 wiki
     wiki_page_created = ""
@@ -85,6 +90,7 @@ async def run_query(
         wiki_page_created = await _save_answer_to_wiki(
             question, answer, citations, target_lang
         )
+        logger.info(f"[Query] Answer saved to wiki: {wiki_page_created}")
 
     return QueryResponse(
         answer=answer,
@@ -110,7 +116,7 @@ async def _direct_answer(
         },
         {"role": "user", "content": question + lang_rule},
     ]
-    answer, usage = llm_client.chat(messages, max_tokens=4000)
+    answer, usage = await llm_client.achat(messages, max_tokens=4000)
     return QueryResponse(answer=answer, tokens_used=usage)
 
 

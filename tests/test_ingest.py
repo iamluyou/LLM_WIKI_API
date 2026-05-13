@@ -185,7 +185,7 @@ class TestWikiManagerDirect:
 
     def test_write_raw_source(self, temp_wiki):
         wm = WikiManager(temp_wiki)
-        path = wm.write_raw_source("new-source.md", "# New Source\n\nContent")
+        actual_name, path = wm.write_raw_source("new-source.md", "# New Source\n\nContent")
         assert "raw/sources/new-source.md" in path
 
     def test_search_pages(self, temp_wiki):

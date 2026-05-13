@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime
 from typing import Optional
 
 import frontmatter
@@ -133,13 +134,49 @@ class WikiManager:
         with open(full_path, "a", encoding="utf-8") as f:
             f.write(content)
 
-    def write_raw_source(self, filename: str, content: str) -> str:
-        """写入原始资料到 raw/sources/，返回相对路径"""
+    def get_unique_raw_path(self, filename: str) -> str:
+        """对齐官方 getUniqueDestPath：重名文件自动重命名，绝不覆盖
+
+        策略（逐级递进）：
+        1. 原始文件名
+        2. 追加日期 {name}-{YYYYMMDD}.ext
+        3. 日期+计数器 {name}-{YYYYMMDD}-2.ext (2~99)
+        4. 兜底: {name}-{YYYYMMDD}-{timestamp}.ext
+        """
         os.makedirs(self.raw_dir, exist_ok=True)
-        full_path = os.path.join(self.raw_dir, filename)
+        base = os.path.join(self.raw_dir, filename)
+
+        # 1. 原始路径
+        if not os.path.exists(base):
+            return filename
+
+        name, ext = os.path.splitext(filename)
+        date_str = datetime.now().strftime("%Y%m%d")
+
+        # 2. 追加日期
+        with_date = f"{name}-{date_str}{ext}"
+        if not os.path.exists(os.path.join(self.raw_dir, with_date)):
+            return with_date
+
+        # 3. 日期 + 计数器 (2~99)
+        for i in range(2, 100):
+            with_counter = f"{name}-{date_str}-{i}{ext}"
+            if not os.path.exists(os.path.join(self.raw_dir, with_counter)):
+                return with_counter
+
+        # 4. 兜底：毫秒时间戳
+        return f"{name}-{date_str}-{int(datetime.now().timestamp() * 1000)}{ext}"
+
+    def write_raw_source(self, filename: str, content: str) -> tuple[str, str]:
+        """写入原始资料到 raw/sources/，返回 (实际文件名, 相对路径)
+
+        自动处理重名：对齐官方 getUniqueDestPath 策略，绝不覆盖已有文件。
+        """
+        actual_filename = self.get_unique_raw_path(filename)
+        full_path = os.path.join(self.raw_dir, actual_filename)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return os.path.join("raw", "sources", filename)
+        return actual_filename, os.path.join("raw", "sources", actual_filename)
 
     # --- 统计 ---
 

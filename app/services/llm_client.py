@@ -1,5 +1,6 @@
 """LLM 调用封装，OpenAI 兼容协议"""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -32,6 +33,8 @@ class LLMClient:
         temperature: float = 0.3,
     ) -> tuple[str, dict]:
         """调用 LLM，返回 (response_text, usage_stats)"""
+        msg_count = len(messages)
+        logger.info(f"[LLM] Calling {self.model} with {msg_count} messages, max_tokens={max_tokens}")
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -44,10 +47,20 @@ class LLMClient:
                 "input": getattr(response.usage, "prompt_tokens", 0) or 0,
                 "output": getattr(response.usage, "completion_tokens", 0) or 0,
             }
+            logger.info(f"[LLM] Response received: {len(text)} chars, tokens={usage}")
             return text, usage
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            logger.error(f"[LLM] Call failed: {e}")
             raise
+
+    async def achat(
+        self,
+        messages: list[dict],
+        max_tokens: int = 16000,
+        temperature: float = 0.3,
+    ) -> tuple[str, dict]:
+        """异步调用 LLM（在线程池中执行同步调用，避免阻塞事件循环）"""
+        return await asyncio.to_thread(self.chat, messages, max_tokens, temperature)
 
     def chat_stream(self, messages: list[dict], max_tokens: int = 16000, temperature: float = 0.3):
         """流式调用 LLM"""

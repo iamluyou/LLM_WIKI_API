@@ -54,6 +54,7 @@ def init_wiki_root(wiki_root: Optional[str] = None, force: bool = False) -> dict
 
     # 1. 创建顶层目录
     os.makedirs(root, exist_ok=True)
+    logger.info(f"[Init] Starting wiki_root initialization: {root} (force={force})")
 
     # 2. 创建 raw/sources/ 和 raw/assets/
     for raw_sub in ("sources", "assets"):

@@ -32,7 +32,8 @@ class TestWikiManagerIO:
         assert wm.read_wiki_page("nonexistent.md") is None
 
     def test_write_raw_source(self, wm):
-        rel_path = wm.write_raw_source("test.md", "Source content")
+        actual_name, rel_path = wm.write_raw_source("test.md", "Source content")
+        assert actual_name == "test.md"
         assert rel_path == os.path.join("raw", "sources", "test.md")
         assert os.path.isfile(os.path.join(wm.raw_dir, "test.md"))
 

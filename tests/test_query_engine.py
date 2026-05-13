@@ -18,7 +18,7 @@ class TestRunQuery:
             mock_svc = MagicMock()
             mock_svc.search.return_value = ([], 0)
             mock_svc_cls.return_value = mock_svc
-            mock_llm.chat.return_value = ("I don't know", {"input": 5, "output": 10})
+            mock_llm.achat = AsyncMock(return_value=("I don't know", {"input": 5, "output": 10}))
 
             result = await run_query("What is X?", save_to_wiki=False)
             assert result.answer == "I don't know"
@@ -43,7 +43,7 @@ class TestRunQuery:
             mock_wm.read_wiki_page.return_value = "---\ntitle: AI\n---\nAI content"
             mock_wm.read_purpose.return_value = "Research"
             mock_wm.read_schema.return_value = "Schema"
-            mock_llm.chat.return_value = ("AI is artificial intelligence", {"input": 20, "output": 30})
+            mock_llm.achat = AsyncMock(return_value=("AI is artificial intelligence", {"input": 20, "output": 30}))
 
             result = await run_query("What is AI?", save_to_wiki=False)
             assert "artificial intelligence" in result.answer

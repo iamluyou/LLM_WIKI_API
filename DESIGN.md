@@ -1,6 +1,6 @@
 # LLM-WIKI API 架构设计技术文档
 
-> 版本：v1.0 | 日期：2026-05-12 | 状态：已实现
+> 版本：v1.2 | 日期：2026-05-13 | 状态：已实现
 
 ## 1. 概述
 
@@ -11,7 +11,7 @@
 - **效果对齐桌面版**：Prompt 完整复刻、目录结构一致、页面合并策略相同
 - **不替代桌面版**：API 与桌面版共享同一 `WIKI_ROOT` 目录，通过文件锁互斥
 - **Schema 驱动**：Ingest/Query 均读取 `purpose.md` + `schema.md` 作为 LLM 上下文
-- **安全第一**：路径穿越防护、语言一致性守卫、硬失败隔离缓存
+- **安全第一**：路径穿越防护、语言一致性守卫、硬失败隔离缓存、Ingest 内容清洗
 
 ### 1.2 技术栈
 
@@ -53,10 +53,10 @@
 │  │├genera-  │  │ blocks   │  │├path_guard   │                  │
 │  │ tion     │  │├review_  │  │├language_    │                  │
 │  │├merger   │  │ blocks   │  │ guard       │                  │
-│  │└language │  │└front-  │  │└ingest_cache│                  │
-│  │          │  │ matter   │  │              │                  │
-│  └────┬─────┘  └──────────┘  └──────────────┘                  │
-│       ▼                                                         │
+│  │└language │  │└front-  │  │├ingest_     │                  │
+│  │          │  │ matter   │  │ sanitize    │                  │
+│  └────┬─────┘  └──────────┘  │└ingest_cache│                  │
+│       ▼                       └──────────────┘                  │
 │  ┌──────────┐                                                   │
 │  │LLM Client│  (OpenAI 兼容, glm-5.1, reasoning=max)           │
 │  └──────────┘                                                   │
@@ -81,7 +81,8 @@
               │   └── log.md
               ├── .llm-wiki/        ← 备份 & 缓存
               │   ├── page-history/
-              │   └── ingest-cache/
+              │   ├── ingest-cache/
+              │   └── tasks.json      ← 任务状态持久化
               ├── .obsidian/        ← Obsidian 配置
               ├── purpose.md        ← LLM 上下文
               └── schema.md         ← LLM 上下文
@@ -147,10 +148,15 @@ POST /api/ingest
   │
   ├── Step 2: Generation（生成）
   │   │  Prompt: buildGenerationPrompt()
-  │   │  角色: wiki maintainer
+  │   │  结构: system (规则+示例) + user (上下文+源内容)
   │   │  输出: ---FILE: wiki/xxx.md--- / ---REVIEW: type | Title---
   │   │
   │   └── 7 条严格输出要求（首字符为 -、禁止前言等）
+  │
+  ├── Ingest 清洗 → ingest_sanitize()
+  │   ├── 剥离代码围栏包装（LLM 偶尔包裹 ```markdown ... ```）
+  │   ├── 修复 Frontmatter 前缀（移除 LLM 添加的多余 ```yaml 行）
+  │   └── 修复 Wikilink 列表（[[a]], [[b]] → ["[[a]]", "[[b]]"]）
   │
   ├── 解析 FILE 块 → parseFileBlocks()
   │   └── 6 类危害修复（CRLF/截断/大小写/围栏/空路径/格式）
@@ -160,13 +166,13 @@ POST /api/ingest
   │   └── LanguageGuard — 语言一致性检查
   │
   ├── 页面合并（三层机制）
-  │   ├── 第1层: Frontmatter 数组字段 Union 合并
-  │   ├── 第2层: Body LLM 合并（buildPageMerger）+ 健全性检查
+  │   ├── 第1层: Frontmatter 数组字段 Union 合并（直接文本操作）
+  │   ├── 第2层: Body LLM 合并（buildPageMerger 接收第1层结果）+ 健全性检查
   │   └── 第3层: 锁定字段强制回写（type/title/created）
   │
   ├── 写入文件
   │   ├── 内容页 → 三层合并后写入
-  │   ├── index.md / overview.md → 整体覆盖
+  │   ├── index.md / overview.md → 直接覆盖（对齐官方 listing pages 策略）
   │   └── log.md → 追加
   │
   ├── 缓存保存（仅全部成功时）
@@ -181,6 +187,21 @@ Ingest 是耗时操作（LLM 两步调用 + 可能的合并调用），采用异
 1. `POST /api/ingest` → 立即返回 `task_id`
 2. `GET /api/tasks/{task_id}` → 轮询任务状态
 3. 内部通过 `asyncio.Queue` 串行执行（与桌面版一致）
+
+**任务状态持久化**：所有任务记录持久化到 `{WIKI_ROOT}/.llm-wiki/tasks.json`，服务重启后可恢复。重启时处于 `processing` 的任务自动标记为 `failed`（因处理过程已中断）。写入时机：任务提交、开始处理、完成/失败时。
+
+### 4.3 Source 重名处理
+
+对齐官方桌面版 `getUniqueDestPath` 策略，**绝不覆盖已有文件**。`WikiManager.get_unique_raw_path()` 逐级递进生成唯一文件名：
+
+| 优先级 | 文件名格式 | 示例 |
+|--------|-----------|------|
+| 1 | 原始文件名 | `report.md` |
+| 2 | 追加日期 | `report-20260512.md` |
+| 3 | 日期+计数器 | `report-20260512-2.md`（2~99） |
+| 4 | 兜底：毫秒时间戳 | `report-20260512-1749723456789.md` |
+
+`POST /api/sources` 返回的 `source_id` 和 `filename` 反映实际写入的文件名，可能与请求时不同。
 
 ## 5. Source 删除（级联删除）
 
@@ -275,11 +296,25 @@ def normalize_wiki_ref_key(ref: str) -> str:
 
 `content_matches_target_language()` 检查生成内容是否与目标语言一致。跳过 log.md、entities/、sources/ 等合理包含跨语言专有名词的页面。
 
-### 7.4 SHA256 增量缓存
+### 7.4 Ingest 内容清洗
+
+`ingest_sanitize.py` 对 LLM 生成的每个 FILE 块内容进行结构化清洗，修正 LLM 输出中的常见格式错误：
+
+| 清洗规则 | 输入示例 | 输出 |
+|----------|---------|------|
+| 剥离代码围栏包装 | `` ```markdown\n---\ntype: concept\n```` | `---\ntype: concept\n` |
+| 修复 Frontmatter 前缀 | `` ```yaml\ntype: concept\n```` | `type: concept` |
+| 修复 Wikilink 列表 | `related: [[a]], [[b]]` | `related: ["[[a]]", "[[b]]"]` |
+
+**设计意图**：LLM 偶尔会在 FILE 块内容外层包裹代码围栏，或在 frontmatter 前添加 YAML 标记，或输出逗号分隔的 wikilink 列表（不符合 YAML 数组语法）。这些格式错误会导致 frontmatter 解析失败，进而触发 fallback 数组合并（丢失正文内容）。清洗层在 `parseFileBlocks()` 之后、写入之前执行。
+
+### 7.5 SHA256 增量缓存
 
 - 相同 source 内容（SHA256 比对）→ 跳过 LLM 调用
+- **文件存在性校验**（v1.2）：缓存命中时额外验证所有 `files_written` 仍存在于磁盘，任一缺失则视为缓存失效。对齐官方 `ingest-cache.ts` 的 bug 修复（幽灵条目问题）
 - 存在硬失败 → 不保存缓存（防止冻结部分结果）
 - 缓存存储在 `.llm-wiki/ingest-cache/`
+- 保存 `files_written`（从 `pages_created` + `pages_updated` 提取）和 `timestamp` 字段
 
 ## 8. 页面合并机制
 
@@ -287,9 +322,13 @@ def normalize_wiki_ref_key(ref: str) -> str:
 
 | 层级 | 范围 | 策略 | 说明 |
 |------|------|------|------|
-| 第1层 | sources/tags/related | Union 合并 | 纯集合运算，零 LLM 调用 |
-| 第2层 | Body 正文 | LLM 合并 | 新旧不同时调用 buildPageMerger + 健全性检查 |
+| 第1层 | sources/tags/related | Union 合并（直接文本操作） | 正则替换 frontmatter 数组字段，支持 block form + inline form，零 LLM 调用 |
+| 第2层 | Body 正文 | LLM 合并 | merger_fn 接收第1层合并后的文本，新旧不同时调用 buildPageMerger + 健全性检查 |
 | 第3层 | type/title/created | 强制回写 | 即使 LLM 改了也恢复原值 |
+
+**第1层改进**（v1.1→v1.2）：使用直接文本操作（正则解析 + 替换）替代 python-frontmatter 序列化，避免 frontmatter 格式被意外改写（如引号丢失、缩进变化）。v1.2 新增 block form 解析支持（`name:\n  - a\n  - b`），对齐官方 `parseFrontmatterArray`/`writeFrontmatterArray`，统一输出 inline form。
+
+**第2层改进**（v1.1）：`merger_fn` 接收第1层合并后的文本作为 `new_content`，确保 LLM 合并时 frontmatter 数组字段已包含完整集合，避免 LLM 合并结果中丢失数组字段。
 
 ### 8.2 健全性检查
 
@@ -303,6 +342,10 @@ def normalize_wiki_ref_key(ref: str) -> str:
 
 合并覆盖前 best-effort 备份到 `.llm-wiki/page-history/`，错误不阻塞主流程。
 
+### 8.4 index.md / overview.md 覆盖策略
+
+对齐桌面版 `listing_pages` 策略：`index.md` 和 `overview.md` 由 LLM 完整生成后直接覆盖写入，不进行增量合并。这避免了增量追加导致的内容冗余和结构混乱问题。
+
 ## 9. Prompt 保真度
 
 ### 9.1 对齐桌面版 Prompt 结构
@@ -310,10 +353,35 @@ def normalize_wiki_ref_key(ref: str) -> str:
 | Prompt | 角色 | 核心结构 |
 |--------|------|---------|
 | `buildAnalysisPrompt` | expert research analyst | 角色定义 + 语言强制 + 6 维分析 + 上下文注入 + 反 CoT 指令 |
-| `buildGenerationPrompt` | wiki maintainer | 角色定义 + 6 项生成 + Frontmatter 5 条规则 + FILE/REVIEW 格式 + 7 条严格要求 + 尾部语言重复 |
+| `buildGenerationPrompt` | wiki maintainer | system: 规则 + 示例；user: 上下文 + 截断源内容 |
 | `buildPageMerger` | — | 保留双方事实 + 消除冗余 + 重组织 + 保持 wikilink |
 
-### 9.2 语言强制策略
+### 9.2 Generation Prompt 结构（v1.1 重写）
+
+对齐官方桌面版 Prompt 结构，将原单条消息拆分为 system + user 两条消息：
+
+**system 消息**（稳定规则）：
+- 角色定义（wiki maintainer）
+- Frontmatter 5 条规则 + 示例
+- FILE/REVIEW 输出格式规范
+- 7 条严格输出要求
+- 尾部语言强制
+
+**user 消息**（动态上下文）：
+- purpose.md 内容
+- schema.md 内容
+- Analysis 结果
+- 现有 wiki 文件列表
+- **截断源内容**（`SOURCE_CONTENT_MAX_CHARS` 限制，默认 8000 字符）
+
+### 9.3 源内容注入
+
+Generation 的 user 消息中包含截断后的源文件内容，使 LLM 能基于真实素材生成更准确的知识页面，而非仅依赖 Analysis 的摘要。
+
+- 截断限制由 `SOURCE_CONTENT_MAX_CHARS` 配置（默认 8000）
+- 超长内容截断并追加 `... (truncated, {total} chars total)` 提示
+
+### 9.4 语言强制策略
 
 - 首尾双次注入语言指令（利用 LLM 近期指令权重最高特性）
 - `MANDATORY OUTPUT LANGUAGE: Chinese` 在 prompt 首尾各出现一次
@@ -372,7 +440,7 @@ Finding 类型额外：`source`, `confidence`, `replicated`
 
 | 端点 | 方法 | 参数 | 说明 |
 |------|------|------|------|
-| `/api/sources` | POST | title, content, filename | 存入资料 |
+| `/api/sources` | POST | title, content, filename | 存入资料（重名自动重命名） |
 | `/api/sources/{source_id}` | DELETE | — | 级联删除 source |
 | `/api/ingest` | POST | source_id (可选) | 执行 Ingest |
 | `/api/tasks/{task_id}` | GET | — | 查询任务状态 |
@@ -425,10 +493,36 @@ app/templates/wiki_root/
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| Ingest 耗时长 | API 超时 | 异步任务模式 |
+| Ingest 耗时长 | API 超时 | 异步任务模式 + 任务状态持久化 |
+| 服务重启 | 任务记录丢失 | tasks.json 持久化，重启可恢复 |
 | 多端同时写入 | 数据冲突 | 项目级文件锁 |
-| LLM 输出格式漂移 | 解析失败 | 围栏感知解析 + 软丢弃 |
+| Source 文件重名 | 覆盖已有数据 | 对齐官方 getUniqueDestPath 自动重命名 |
+| LLM 输出格式漂移 | 解析失败 | 围栏感知解析 + ingest_sanitize 清洗 + 软丢弃 |
 | 页面合并冲突 | 信息丢失 | 三层合并 + 健全性检查 + 备份 |
 | 路径穿越攻击 | 安全风险 | isSafeIngestPath |
 | 语言不一致 | 内容混乱 | 语言守卫 + 首尾双次语言指令 |
 | 缓存冻结部分结果 | 后续跳过失败页面 | 硬失败不保存缓存 |
+| 缓存幽灵条目 | 文件已删除但缓存仍命中 | 缓存命中时校验 files_written 存在性（v1.2） |
+| Frontmatter 解析失败 | 数组合并丢失正文 | ingest_sanitize 预清洗 + fallback 合并 |
+
+## 15. 变更记录
+
+### v1.2 (2026-05-13)
+
+| 变更项 | 说明 | 影响文件 |
+|--------|------|----------|
+| 缓存文件存在性校验 | 缓存命中时验证 files_written 仍存在于磁盘，防止幽灵条目 | `safety/ingest_cache.py` |
+| 缓存保存 files_written + timestamp | 对齐官方 ingest-cache.ts，保存生成文件路径列表和时间戳 | `safety/ingest_cache.py` |
+| block form 解析支持 | `_parse_frontmatter_array` 支持 `name:\n  - a\n  - b` 格式 | `services/page_merger.py` |
+| block form 写入替换 | `_write_frontmatter_array` 支持替换 block form → inline form | `services/page_merger.py` |
+| 新增测试 | ingest_cache 6 个 + block form 6 个，共 288 个测试 | `tests/test_ingest_cache.py` (新), `tests/test_page_merger_ext.py` |
+
+### v1.1 (2026-05-13)
+
+| 变更项 | 说明 | 影响文件 |
+|--------|------|----------|
+| Generation Prompt 重写 | 拆分 system/user 消息，注入截断源内容 | `prompts/generation.py`, `services/ingest_engine.py` |
+| 新增 ingest_sanitize | 清洗代码围栏/Frontmatter 前缀/Wikilink 列表 | `safety/ingest_sanitize.py` (新) |
+| 数组合并改进 | 第1层改为直接文本操作，第2层接收第1层结果 | `services/page_merger.py` |
+| index/overview 直接覆盖 | 对齐官方 listing pages 策略 | `services/ingest_engine.py` |
+| 新增配置 SOURCE_CONTENT_MAX_CHARS | 控制源内容注入长度（默认 8000） | `config.py`, `.env.example` |

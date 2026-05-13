@@ -1,5 +1,6 @@
 """存入原始资料 + 删除接口"""
 
+import logging
 import os
 import re
 from datetime import datetime
@@ -10,12 +11,15 @@ from app.models.wiki import SourceCreateRequest, SourceCreateResponse, SourceDel
 from app.services.source_lifecycle import delete_source
 from app.services.wiki_manager import wiki_manager
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["sources"])
 
 
 @router.post("/sources", response_model=SourceCreateResponse)
 async def create_source(req: SourceCreateRequest):
     """存入原始资料（Level 1 — 无 LLM）"""
+    logger.info(f"[API] POST /api/sources — title={req.title!r}")
     # 生成文件名
     if req.filename:
         filename = req.filename
@@ -28,12 +32,13 @@ async def create_source(req: SourceCreateRequest):
         date_str = datetime.now().strftime("%Y-%m-%d")
         filename = f"{slug}-{date_str}.md"
 
-    # 写入
-    rel_path = wiki_manager.write_raw_source(filename, req.content)
+    # 写入（自动处理重名）
+    actual_filename, rel_path = wiki_manager.write_raw_source(filename, req.content)
+    logger.info(f"[API] Source created: filename={actual_filename}, size={len(req.content.encode('utf-8'))} bytes")
 
     return SourceCreateResponse(
-        source_id=os.path.splitext(filename)[0],
-        filename=filename,
+        source_id=os.path.splitext(actual_filename)[0],
+        filename=actual_filename,
         path=rel_path,
         size_bytes=len(req.content.encode("utf-8")),
         ingested=False,
@@ -55,8 +60,10 @@ async def delete_source_endpoint(source_id: str):
     try:
         result = delete_source(source_id)
     except FileNotFoundError:
+        logger.warning(f"[API] DELETE /api/sources/{source_id} — source not found")
         raise HTTPException(status_code=404, detail=f"Source not found: {source_id}")
     except Exception as e:
+        logger.error(f"[API] DELETE /api/sources/{source_id} — failed: {e}")
         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
 
     return SourceDeleteResponse(

@@ -1,11 +1,14 @@
 """内容检索 + 单页面接口"""
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 
 from app.models.wiki import PageListResponse, PageSummary
 from app.services.wiki_manager import wiki_manager
 
 router = APIRouter(prefix="/api", tags=["pages"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/pages", response_model=PageListResponse)
@@ -17,6 +20,7 @@ async def list_pages(
     offset: int = 0,
 ):
     """内容检索（Level 1 — 无 LLM）"""
+    logger.debug(f"[API] GET /api/pages — keyword={keyword!r}, type={type!r}, tag={tag!r}, limit={limit}, offset={offset}")
     page_type = type if type else None
     tag_filter = tag if tag else None
     pages, total = wiki_manager.search_pages(
