@@ -138,6 +138,16 @@ POST /api/init
 
 ### 4.1 两步思维链
 
+#### LLM 调用参数对照
+
+| 阶段 | 桌面版参数 | API 版参数 | 差异 |
+|------|-----------|-----------|------|
+| Stage 1 (Analysis) | `temperature=0.1, max_tokens=4096, reasoning={mode:"off"}` | 无覆盖（默认值） | ❌ 缺 temperature/reasoning/max_tokens |
+| Stage 2 (Generation) | `temperature=0.1, max_tokens=8192, reasoning={mode:"off"}` | `max_tokens=32000` | ❌ max_tokens 4倍，缺 temperature/reasoning |
+| Page Merge | `temperature=0.1` | 无覆盖（默认值） | ❌ 缺 temperature |
+
+> **注意**：桌面版 Ingest 两阶段均设 `temperature=0.1` + `reasoning=off` 以获得确定性输出，API 版当前未对齐。
+
 ```
 POST /api/ingest
   │
@@ -499,14 +509,11 @@ def normalize_wiki_ref_key(ref: str) -> str:
 - schema.md 内容
 - Analysis 结果
 - 现有 wiki 文件列表
-- **截断源内容**（`SOURCE_CONTENT_MAX_CHARS` 限制，默认 8000 字符）
+- 源文件内容
 
 ### 10.3 源内容注入
 
-Generation 的 user 消息中包含截断后的源文件内容，使 LLM 能基于真实素材生成更准确的知识页面，而非仅依赖 Analysis 的摘要。
-
-- 截断限制由 `SOURCE_CONTENT_MAX_CHARS` 配置（默认 8000）
-- 超长内容截断并追加 `... (truncated, {total} chars total)` 提示
+Generation 的 user 消息中包含源文件内容，使 LLM 能基于真实素材生成更准确的知识页面，而非仅依赖 Analysis 的摘要。
 
 ### 10.4 语言强制策略
 
@@ -688,4 +695,3 @@ app/templates/wiki_root/
 | 新增 ingest_sanitize | 清洗代码围栏/Frontmatter 前缀/Wikilink 列表 | `safety/ingest_sanitize.py` (新) |
 | 数组合并改进 | 第1层改为直接文本操作，第2层接收第1层结果 | `services/page_merger.py` |
 | index/overview 直接覆盖 | 对齐官方 listing pages 策略 | `services/ingest_engine.py` |
-| 新增配置 SOURCE_CONTENT_MAX_CHARS | 控制源内容注入长度（默认 8000） | `config.py`, `.env.example` |
