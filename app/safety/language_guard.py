@@ -25,6 +25,7 @@ def content_matches_target_language(content: str, target_lang: str) -> bool:
     - 剥离 frontmatter 和代码/数学块
     - 检测正文脚本族
     - 比较目标语言
+    - 对 CJK 目标语言容忍技术文档中的英文术语（阈值 0.3）
     """
     # 剥离 frontmatter
     body = re.sub(r"^---\n[\s\S]*?\n---\n", "", content, count=1)
@@ -57,4 +58,14 @@ def content_matches_target_language(content: str, target_lang: str) -> bool:
     if expected is None:
         return True  # 未知目标语言，不检查
 
-    return script == expected
+    if script == expected:
+        return True
+
+    # CJK 目标语言容忍技术文档：只要正文包含 30%+ CJK 字符即视为通过
+    if expected == "cjk":
+        cjk = len(re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f]", body))
+        total = len(re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303fa-zA-Z]", body))
+        if total > 0 and cjk / total >= 0.3:
+            return True
+
+    return False
