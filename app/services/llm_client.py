@@ -21,9 +21,11 @@ class LLMClient:
         self.api_key = api_key or settings.llm_api_key
         self.base_url = base_url or settings.llm_base_url
         self.model = model or settings.llm_model
+        # 对齐桌面版 30 分钟 backstop 超时（针对超大上下文推理模型）
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
+            timeout=1800.0,  # 30 minutes
         )
 
     def chat(

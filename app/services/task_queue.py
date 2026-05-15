@@ -12,6 +12,9 @@ from app.models.wiki import TaskResult, TaskStatusResponse
 
 logger = logging.getLogger(__name__)
 
+# Worker 级超时：30 分钟（对齐桌面版 backstop timeout）
+_WORKER_TIMEOUT = 1800
+
 
 class Task:
     def __init__(self, task_id: str, source_ids: list[str]):
@@ -62,6 +65,7 @@ class TaskQueue:
         self._running = False
         self._worker_task: Optional[asyncio.Task] = None
         self._persist_path: Optional[str] = None
+        self._stale_pending: list[Task] = []
 
     def _get_persist_path(self) -> str:
         if self._persist_path:
@@ -89,6 +93,7 @@ class TaskQueue:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            stale_pending = []
             for tid, td in data.items():
                 task = Task.from_dict(td)
                 # 重启后，processing 状态的任务标记为 failed（中断丢失）
@@ -96,10 +101,16 @@ class TaskQueue:
                     task.status = "failed"
                     task.progress = "Server restarted during processing"
                 self._tasks[tid] = task
+                # 收集 pending 任务，稍后重新入队
+                if task.status == "pending":
+                    stale_pending.append(task)
             if self._tasks:
-                logger.info(f"[TaskQueue] Restored {len(self._tasks)} task(s) from disk")
+                logger.info(f"[TaskQueue] Restored {len(self._tasks)} task(s) from disk, {len(stale_pending)} pending to re-queue")
+            # 重新入队 pending 任务（processor 在 submit 时由调用方提供，恢复时需从外部注入）
+            self._stale_pending = stale_pending
         except Exception as e:
             logger.warning(f"[TaskQueue] Failed to restore tasks: {e}")
+            self._stale_pending = []
 
     async def start(self):
         """启动后台 worker，并从磁盘恢复任务"""
@@ -107,6 +118,13 @@ class TaskQueue:
             self._restore()
             self._running = True
             self._worker_task = asyncio.create_task(self._worker())
+            # 重新入队重启前遗留的 pending 任务
+            if self._stale_pending:
+                from app.services.ingest_engine import run_ingest
+                for task in self._stale_pending:
+                    await self._queue.put((task, run_ingest))
+                    logger.info(f"[TaskQueue] Re-queued stale pending task: {task.task_id}")
+                self._stale_pending = []
 
     async def stop(self):
         """停止后台 worker"""
@@ -158,12 +176,20 @@ class TaskQueue:
             self._persist()
             logger.info(f"[TaskQueue] Task {task.task_id} started processing")
             try:
-                result = await processor(task.source_ids, task)
+                result = await asyncio.wait_for(
+                    processor(task.source_ids, task),
+                    timeout=_WORKER_TIMEOUT,
+                )
                 task.status = "completed"
                 task.progress = "done"
                 task.result = result
                 self._persist()
                 logger.info(f"[TaskQueue] Task {task.task_id} completed successfully")
+            except asyncio.TimeoutError:
+                logger.error(f"[TaskQueue] Task {task.task_id} timed out after {_WORKER_TIMEOUT}s")
+                task.status = "failed"
+                task.progress = f"Task timed out after {_WORKER_TIMEOUT}s"
+                self._persist()
             except Exception as e:
                 logger.error(f"[TaskQueue] Task {task.task_id} failed: {e}")
                 task.status = "failed"
