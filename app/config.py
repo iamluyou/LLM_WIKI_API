@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     ingest_save_to_wiki: bool = Field(default=True, alias="INGEST_SAVE_TO_WIKI")
     ingest_cache_enabled: bool = Field(default=True, alias="INGEST_CACHE_ENABLED")
 
+    # 桌面版 Ingest 委托（方案 B）
+    desktop_ingest_enabled: bool = Field(default=False, alias="DESKTOP_INGEST_ENABLED")
+    desktop_clip_url: str = Field(default="http://127.0.0.1:19827", alias="DESKTOP_CLIP_URL")
+
     # 向量搜索（可选）
     embedding_enabled: bool = Field(default=False, alias="EMBEDDING_ENABLED")
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
